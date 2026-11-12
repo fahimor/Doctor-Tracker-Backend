@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+tests
+.env
+.env.*
+!.env.example
+*.log
+.git
+.gitignore
+Dockerfile
+.dockerignore
+vitest.config.ts
+README.md
+docs
+docker-compose.yml
