@@ -2,6 +2,8 @@
 
 > This repository is the **Express + MongoDB REST API**. The Next.js web app lives in **[Doctor-Tracker-Frontend](https://github.com/fahimor/Doctor-Tracker-Frontend)**.
 
+**Live demo:** <https://doctortrackerr.vercel.app> · **API base:** `https://doctor-tracker-api-962014877339.asia-south1.run.app/api` ([health check](https://doctor-tracker-api-962014877339.asia-south1.run.app/health))
+
 ![Dashboard](https://github.com/fahimor/Doctor-Tracker-Frontend/raw/main/docs/screenshots/desktop-dashboard.png)
 
 ## Description
@@ -15,7 +17,7 @@
 | **Validation** | Zod 4 (body, query and params, all typed) |
 | **Security** | JWT (HS256) in an httpOnly cookie, bcrypt, Helmet, CORS allow-list, rate limiting |
 | **Observability** | Pino JSON logs with a Cloud Logging `severity` field, `/health` endpoint |
-| **Testing** | Vitest + Supertest + mongodb-memory-server (20 integration tests, including `explain()` index checks) |
+| **Testing** | Vitest + Supertest + mongodb-memory-server (24 integration tests, including `explain()` index checks) |
 | **Hosting** | Google Cloud Run (multi-stage Dockerfile, non-root) · MongoDB Atlas |
 
 **Demo accounts** (created by `npm run seed` or `npm run dev:memory`):
@@ -185,9 +187,10 @@ At large scale these would move to a precomputed collection refreshed with `$mer
 npm test
 ```
 
-The 20 tests cover:
+The 24 tests cover:
 - auth: cookie flags, wrong password, tampered token, validation, viewer gets 403;
 - doctors: pagination metadata, prefix search, filters, create/update/delete, duplicate email returns 409;
+- the `patientCount` counter: sorting by it both ways, staying in sync on add, reassign and delete, and `db:recount` repairing drift;
 - the nested doctor→patients routes, including that a patient can't be deleted through another doctor's URL;
 - patient filters and sorting, and search tokens refreshed on update;
 - dashboard aggregation totals;
@@ -200,7 +203,7 @@ The 20 tests cover:
 ```bash
 gcloud run deploy doctor-tracker-api \
   --source . --region asia-south1 --allow-unauthenticated --port 8080 \
-  --set-env-vars "NODE_ENV=production,TRUST_PROXY=2,CORS_ORIGINS=https://your-app.vercel.app" \
+  --set-env-vars "NODE_ENV=production,TRUST_PROXY=2,MONGODB_DB_NAME=doctor-tracker,CORS_ORIGINS=https://doctortrackerr.vercel.app" \
   --set-secrets "MONGODB_URI=mongodb-uri:latest,JWT_SECRET=jwt-secret:latest"
 ```
 
