@@ -14,6 +14,9 @@ const SORTS: Record<(typeof DOCTOR_SORTS)[number], SortSpec> = {
   oldest: { createdAt: 1, _id: 1 },
   name_asc: { name: 1, _id: 1 },
   name_desc: { name: -1, _id: -1 },
+  // Both directions are served by the { patientCount: -1, _id: -1 } index.
+  patients_desc: { patientCount: -1, _id: -1 },
+  patients_asc: { patientCount: 1, _id: 1 },
 };
 
 function buildDoctorFilter(q: ListDoctorsQuery): Record<string, unknown> {
@@ -31,19 +34,6 @@ function buildDoctorFilter(q: ListDoctorsQuery): Record<string, unknown> {
   return filter;
 }
 
-/**
- * Patient counts for a page of doctors in ONE aggregation (no N+1 queries).
- * `$match` on `doctor` uses the `{ doctor: 1, admissionDate: -1 }` index.
- */
-async function patientCountsFor(doctorIds: Types.ObjectId[]): Promise<Map<string, number>> {
-  if (doctorIds.length === 0) return new Map();
-  const rows = await Patient.aggregate<{ _id: Types.ObjectId; count: number }>([
-    { $match: { doctor: { $in: doctorIds } } },
-    { $group: { _id: '$doctor', count: { $sum: 1 } } },
-  ]);
-  return new Map(rows.map((r) => [String(r._id), r.count]));
-}
-
 export async function listDoctors(q: ListDoctorsQuery) {
   const filter = buildDoctorFilter(q);
   const unfiltered = Object.keys(filter).length === 0;
@@ -53,8 +43,8 @@ export async function listDoctors(q: ListDoctorsQuery) {
     unfiltered ? Doctor.estimatedDocumentCount() : Doctor.countDocuments(filter),
   ]);
 
-  const counts = await patientCountsFor(items.map((d) => d._id));
-  const data = items.map((d) => ({ ...d, patientCount: counts.get(String(d._id)) ?? 0 }));
+  // patientCount is stored on the doctor, so the page needs no extra query.
+  const data = items.map((d) => ({ ...d, patientCount: d.patientCount ?? 0 }));
 
   return { data, meta: buildPageMeta(q, total) };
 }
@@ -121,4 +111,27 @@ export async function deleteDoctor(id: string) {
   const { deletedCount: deletedPatients } = await Patient.deleteMany({ doctor: id });
   await Doctor.deleteOne({ _id: id });
   return { deletedPatients };
+}
+
+/**
+ * Rebuilds every doctor's `patientCount` from the patients collection.
+ * The counter is maintained atomically on each write, so this is only for
+ * repairs (e.g. after manual edits in the database) and for seeding.
+ */
+export async function recountPatientCounts(): Promise<{ doctorsUpdated: number }> {
+  const [rows, doctors] = await Promise.all([
+    Patient.aggregate<{ _id: Types.ObjectId; count: number }>([{ $group: { _id: '$doctor', count: { $sum: 1 } } }]),
+    Doctor.find({}, { patientCount: 1 }).lean(),
+  ]);
+  const actual = new Map(rows.map((r) => [String(r._id), r.count]));
+
+  // Write only the doctors whose stored count is wrong.
+  const fixes = doctors
+    .map((d) => ({ id: d._id, count: actual.get(String(d._id)) ?? 0, stored: d.patientCount ?? 0 }))
+    .filter((d) => d.count !== d.stored);
+
+  if (fixes.length) {
+    await Doctor.bulkWrite(fixes.map((f) => ({ updateOne: { filter: { _id: f.id }, update: { $set: { patientCount: f.count } } } })));
+  }
+  return { doctorsUpdated: fixes.length };
 }

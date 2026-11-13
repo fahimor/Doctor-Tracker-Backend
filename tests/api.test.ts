@@ -129,6 +129,62 @@ describe('doctors', () => {
   });
 });
 
+describe('patient-count sorting and counter', () => {
+  const counts = (rows: { patientCount: number }[]) => rows.map((d) => d.patientCount);
+
+  it('sorts doctors by number of patients in both directions', async () => {
+    const desc = counts((await admin.get('/api/doctors?sort=patients_desc&limit=100').expect(200)).body.data);
+    const asc = counts((await admin.get('/api/doctors?sort=patients_asc&limit=100').expect(200)).body.data);
+    expect(desc).toEqual([...desc].sort((a, b) => b - a));
+    expect(asc).toEqual([...asc].sort((a, b) => a - b));
+    expect(desc[0]).toBeGreaterThan(desc.at(-1)!);
+
+    // Combined with a filter, the sort still applies within the matches.
+    const spec = (await admin.get('/api/doctors/facets').expect(200)).body.data.specializations[0];
+    const filtered = counts((await admin.get(`/api/doctors?specialization=${encodeURIComponent(spec)}&sort=patients_desc`).expect(200)).body.data);
+    expect(filtered).toEqual([...filtered].sort((a, b) => b - a));
+  });
+
+  it('matches the real number of patients for every doctor', async () => {
+    const { Patient } = await import('../src/modules/patients/patient.model.js');
+    const doctors = (await admin.get('/api/doctors?limit=100').expect(200)).body.data as { _id: string; patientCount: number }[];
+    for (const d of doctors) {
+      expect(d.patientCount).toBe(await Patient.countDocuments({ doctor: d._id }));
+    }
+  });
+
+  it('keeps the counter in sync on add, reassign and delete', async () => {
+    const list = (await admin.get('/api/doctors?sort=name_asc&limit=2').expect(200)).body.data;
+    const [a, b] = list as { _id: string }[];
+    const countOf = async (id: string) => (await admin.get(`/api/doctors?q=&limit=100`).expect(200)).body.data.find((d: { _id: string }) => d._id === id).patientCount as number;
+    const a0 = await countOf(a!._id);
+    const b0 = await countOf(b!._id);
+
+    const created = await admin
+      .post(`/api/doctors/${a!._id}/patients`)
+      .send({ name: 'Counter Check', age: 50, gender: 'male', phone: '01711000000', diagnosis: 'Check-up', condition: 'stable', admissionDate: '2026-02-01' })
+      .expect(201);
+    expect(await countOf(a!._id)).toBe(a0 + 1);
+
+    await admin.patch(`/api/patients/${created.body.data._id}`).send({ doctor: b!._id }).expect(200);
+    expect(await countOf(a!._id)).toBe(a0);
+    expect(await countOf(b!._id)).toBe(b0 + 1);
+
+    await admin.delete(`/api/patients/${created.body.data._id}`).expect(204);
+    expect(await countOf(b!._id)).toBe(b0);
+  });
+
+  it('recount repairs a counter that drifted', async () => {
+    const { Doctor } = await import('../src/modules/doctors/doctor.model.js');
+    const { recountPatientCounts } = await import('../src/modules/doctors/doctor.service.js');
+    const target = await Doctor.findOne({ patientCount: { $gt: 0 } }).lean();
+    await Doctor.updateOne({ _id: target!._id }, { $set: { patientCount: 999 } });
+    const { doctorsUpdated } = await recountPatientCounts();
+    expect(doctorsUpdated).toBe(1);
+    expect((await Doctor.findById(target!._id).lean())!.patientCount).toBe(target!.patientCount);
+  });
+});
+
 describe("a doctor's patients", () => {
   it('adds, lists and removes patients under a doctor', async () => {
     const doctors = await admin.get('/api/doctors?limit=1').expect(200);
@@ -214,18 +270,32 @@ describe('dashboard', () => {
 });
 
 describe('query plans', () => {
-  it('uses indexes for search, filters and sorting', async () => {
+  // Each case uses the exact filter + sort the services send, including the
+  // `_id` tie-breaker. A "SORT" stage would mean MongoDB reads every match and
+  // sorts in memory before paging, so none of these may have one.
+  it('serves search, filters and every list sort from an index with no in-memory sort', async () => {
     const { Doctor } = await import('../src/modules/doctors/doctor.model.js');
     const { Patient } = await import('../src/modules/patients/patient.model.js');
     const { buildSearchFilter } = await import('../src/utils/search.js');
 
-    const plan = (explain: unknown) => JSON.stringify(explain);
+    const search = JSON.stringify(await Doctor.find(buildSearchFilter('rah card')).explain('queryPlanner'));
+    expect(search).toContain('"indexName":"searchTokens_1"');
 
-    const search = await Doctor.find(buildSearchFilter('rah card')).explain('queryPlanner');
-    expect(plan(search)).toContain('"indexName":"searchTokens_1"');
-
-    const byCondition = await Patient.find({ condition: 'critical' }).sort({ admissionDate: -1 }).explain('queryPlanner');
-    expect(plan(byCondition)).toContain('"indexName":"condition_1_admissionDate_-1"');
-    expect(plan(byCondition)).not.toContain('"stage":"SORT"'); // no in-memory sort
+    const doctor = await Doctor.findOne().lean();
+    const cases: [string, Promise<unknown>, string][] = [
+      ['doctors by specialization', Doctor.find({ specialization: 'Cardiology' }).sort({ createdAt: -1, _id: -1 }).explain('queryPlanner'), 'specialization_1_createdAt_-1__id_-1'],
+      ['doctors by hospital', Doctor.find({ hospital: 'Square Hospital' }).sort({ createdAt: -1, _id: -1 }).explain('queryPlanner'), 'hospital_1_createdAt_-1__id_-1'],
+      ['critical patients', Patient.find({ condition: 'critical' }).sort({ admissionDate: -1, _id: -1 }).explain('queryPlanner'), 'condition_1_admissionDate_-1__id_-1'],
+      ["a doctor's patients", Patient.find({ doctor: doctor!._id }).sort({ admissionDate: -1, _id: -1 }).explain('queryPlanner'), 'doctor_1_admissionDate_-1__id_-1'],
+      ['patients by age, oldest first', Patient.find({}).sort({ age: -1, _id: -1 }).explain('queryPlanner'), 'age_1__id_1'],
+      ['patients by name', Patient.find({}).sort({ name: 1, _id: 1 }).explain('queryPlanner'), 'name_1__id_1'],
+      ['doctors by most patients', Doctor.find({}).sort({ patientCount: -1, _id: -1 }).explain('queryPlanner'), 'patientCount_-1__id_-1'],
+      ['doctors by fewest patients', Doctor.find({}).sort({ patientCount: 1, _id: 1 }).explain('queryPlanner'), 'patientCount_-1__id_-1'],
+    ];
+    for (const [label, explain, index] of cases) {
+      const plan = JSON.stringify(await explain);
+      expect(plan, label).toContain(`"indexName":"${index}"`);
+      expect(plan, label).not.toContain('"stage":"SORT"');
+    }
   });
 });

@@ -170,8 +170,13 @@ export async function seedDatabase({ doctors: doctorCount = 48, patients: patien
     return { ...doc, searchTokens: patientSearchTokens(doc) };
   });
 
+  // Denormalised caseload counter (normally maintained by patient.service).
+  const counts = new Map<string, number>();
+  for (const p of patients) counts.set(String(p.doctor), (counts.get(String(p.doctor)) ?? 0) + 1);
+  const doctorsWithCounts = doctors.map((d) => ({ ...d, patientCount: counts.get(String(d._id)) ?? 0 }));
+
   // insertMany skips save hooks, which is why searchTokens are computed above.
-  await Doctor.insertMany(doctors, { timestamps: false });
+  await Doctor.insertMany(doctorsWithCounts, { timestamps: false });
   for (let i = 0; i < patients.length; i += 500) {
     await Patient.insertMany(patients.slice(i, i + 500), { timestamps: false });
   }

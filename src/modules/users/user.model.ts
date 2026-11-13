@@ -1,4 +1,4 @@
-import { Schema, model, type InferSchemaType } from 'mongoose';
+import { Schema, model } from 'mongoose';
 import { ROLES } from '../auth/auth.types.js';
 
 const userSchema = new Schema(
@@ -13,5 +13,4 @@ const userSchema = new Schema(
   { timestamps: true },
 );
 
-export type UserDoc = InferSchemaType<typeof userSchema>;
 export const User = model('User', userSchema);

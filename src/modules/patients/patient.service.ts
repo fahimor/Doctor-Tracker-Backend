@@ -86,9 +86,20 @@ async function assertDoctorExists(doctorId: string) {
   }
 }
 
+/**
+ * Keeps `Doctor.patientCount` in step with the patients collection. `$inc` is
+ * atomic, so concurrent writes never lose an update. The patient write and
+ * the counter update are two operations; if the process died between them
+ * the count could drift by one, which `npm run db:recount` repairs.
+ */
+function adjustPatientCount(doctorId: unknown, delta: 1 | -1) {
+  return Doctor.updateOne({ _id: doctorId }, { $inc: { patientCount: delta } });
+}
+
 export async function createPatient(input: PatientInput & { doctor: string }) {
   await assertDoctorExists(input.doctor);
   const patient = await Patient.create(input);
+  await adjustPatientCount(input.doctor, 1);
   return getPatient(String(patient._id));
 }
 
@@ -96,17 +107,25 @@ export async function updatePatient(id: string, input: UpdatePatientInput) {
   const patient = await Patient.findById(id);
   if (!patient) throw ApiError.notFound('Patient');
 
-  if (input.doctor && String(patient.doctor) !== input.doctor) {
-    await assertDoctorExists(input.doctor);
-  }
+  const previousDoctor = String(patient.doctor);
+  const reassigned = Boolean(input.doctor) && previousDoctor !== input.doctor;
+  if (reassigned) await assertDoctorExists(input.doctor!);
 
   patient.set(input);
   await patient.save(); // runs the pre-save hook that refreshes searchTokens
+
+  if (reassigned) {
+    await Promise.all([adjustPatientCount(previousDoctor, -1), adjustPatientCount(input.doctor, 1)]);
+  }
   return getPatient(id);
 }
 
 /** When `doctorId` is given the patient must belong to that doctor. */
 export async function deletePatient(id: string, doctorId?: string) {
-  const { deletedCount } = await Patient.deleteOne({ _id: id, ...(doctorId ? { doctor: doctorId } : {}) });
-  if (deletedCount === 0) throw ApiError.notFound('Patient');
+  const deleted = await Patient.findOneAndDelete(
+    { _id: id, ...(doctorId ? { doctor: doctorId } : {}) },
+    { projection: { doctor: 1 } },
+  ).lean();
+  if (!deleted) throw ApiError.notFound('Patient');
+  await adjustPatientCount(deleted.doctor, -1);
 }

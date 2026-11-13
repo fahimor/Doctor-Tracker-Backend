@@ -18,6 +18,12 @@ const envSchema = z.object({
 
   MONGODB_URI: z.string().min(1, 'MONGODB_URI is required'),
   MONGODB_DB_NAME: z.string().optional(),
+  /**
+   * Optional comma-separated DNS servers for Node's resolver. Only needed when
+   * the local resolver refuses SRV lookups for `mongodb+srv://` URIs
+   * (error: "querySrv ECONNREFUSED"). Not needed on Cloud Run.
+   */
+  DNS_SERVERS: z.string().optional(),
 
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
   JWT_TTL_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 12), // 12h
@@ -61,5 +67,3 @@ export const env = {
     .filter(Boolean),
   cookieSecure: raw.COOKIE_SECURE ?? raw.NODE_ENV === 'production',
 };
-
-export type Env = typeof env;

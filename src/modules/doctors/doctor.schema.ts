@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { listPatientsSchema, patientBodyWithoutDoctor } from '../patients/patient.schema.js';
 import { dateInput, emptyToUndefined, idParams, objectId, paginationQuery, phone } from '../../utils/validation.js';
 
 const doctorBody = z.object({
@@ -15,7 +16,7 @@ const csvList = z.preprocess(
   z.array(z.string().trim().min(1).max(160)).max(20),
 );
 
-export const DOCTOR_SORTS = ['newest', 'oldest', 'name_asc', 'name_desc'] as const;
+export const DOCTOR_SORTS = ['newest', 'oldest', 'name_asc', 'name_desc', 'patients_desc', 'patients_asc'] as const;
 
 export const listDoctorsSchema = {
   query: z
@@ -49,6 +50,12 @@ export const updateDoctorSchema = {
 export type UpdateDoctorInput = z.output<typeof updateDoctorSchema.body>;
 
 export const doctorIdSchema = { params: idParams };
+
+/* ---------- Nested: /doctors/:id/patients ---------- */
+
+export const listPatientsOfDoctorSchema = { params: idParams, query: listPatientsSchema.query };
+
+export const addPatientSchema = { params: idParams, body: patientBodyWithoutDoctor };
 
 export const doctorPatientParams = {
   params: z.object({ id: objectId, patientId: objectId }),

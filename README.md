@@ -66,6 +66,8 @@ Then start the [frontend](https://github.com/fahimor/Doctor-Tracker-Frontend) (`
 | `npm run dev` | API in watch mode (`tsx`) |
 | `npm run dev:memory` | In-memory MongoDB + seed + API |
 | `npm run seed` | Seed demo data (refuses in production unless `--force` is passed) |
+| `npm run db:indexes` | Make the database's indexes match the schemas (creates missing ones, drops stale ones) |
+| `npm run db:recount` | Rebuild every doctor's `patientCount` from the patients collection (backfill or repair) |
 | `npm test` | Integration tests |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run build` / `npm start` | Compile to `dist/` / run the compiled server |
@@ -117,7 +119,7 @@ Base path: `/api`. Every route except `/auth/login` and `/auth/logout` requires 
 | `POST` | `/auth/logout` | Clear the cookie |
 | `GET` | `/auth/me` | Current user |
 | `GET` | `/dashboard/stats?range=7d\|30d\|90d\|12m` | Totals, admissions trend, conditions, top-10 caseloads, specializations, demographics |
-| `GET` | `/doctors?page&limit&q&specialization&hospital&from&to&sort` | Paginated list with `patientCount` |
+| `GET` | `/doctors?page&limit&q&specialization&hospital&from&to&sort` | Paginated list with `patientCount`. `sort`: `newest`, `oldest`, `name_asc`, `name_desc`, `patients_desc`, `patients_asc` |
 | `GET` | `/doctors/facets` | Distinct specializations and hospitals |
 | `GET` | `/doctors/options?q&limit` | Lightweight list for pickers |
 | `POST` 🔒 | `/doctors` | Create |
@@ -145,12 +147,15 @@ curl -b cookies.txt 'http://localhost:8080/api/patients?condition=critical&from=
 
 A case-insensitive "contains" regex (`/rah/i`) cannot use an index, so it scans the whole collection. Instead, each document stores `searchTokens`, the lower-cased words of its searchable fields, maintained by a `pre('save')` hook and covered by a **multikey index**. The query `"rah card"` becomes `{ searchTokens: { $all: [/^card/, /^rah/] } }`. Anchored, case-sensitive regexes become index range scans. User input is regex-escaped, and the longest term goes first because it is the most selective.
 
-Every filter and sort combination has a compound index that follows **ESR** (Equality, Sort, Range), for example `{ condition: 1, admissionDate: -1 }` and `{ doctor: 1, admissionDate: -1 }`. `_id` is always the last sort key so pages are stable. A test runs `explain()` and asserts that the expected index is used with **no in-memory SORT stage**.
+Every filter and sort combination has a compound index that follows **ESR** (Equality, Sort, Range), for example `{ condition: 1, admissionDate: -1, _id: -1 }` and `{ doctor: 1, admissionDate: -1, _id: -1 }`. `_id` is the last sort key so pages are stable, and it is also the last index key, so a page streams straight from the index. Without it MongoDB reads every match and sorts in memory: on Atlas that was 117 documents read for a 10-row page of critical patients, and now it is 10. A test runs `explain()` on every list sort and asserts the expected index is used with **no in-memory SORT stage**.
+
+Mongoose creates missing indexes on startup but never drops old ones, so after changing an index run `npm run db:indexes` (or `npm run db:indexes:prod` from the compiled build).
 
 The list endpoints follow the same approach:
 - the page query and the count run in parallel (`Promise.all`), and the count is O(1) via `estimatedDocumentCount()` when no filter is applied;
 - reads use `lean()`;
-- there are no N+1 queries: patient counts come from one batched `$group` per page, and doctor names from one `$in` populate.
+- each doctor stores a denormalised `patientCount`, kept in sync with atomic `$inc` on every patient create, delete and reassignment. Sorting by most or fewest patients is then a plain index read on `{ patientCount: -1, _id: -1 }`, and the list needs no per-page counting query. `npm run db:recount` rebuilds the counters from the patients collection if they ever drift;
+- there are no N+1 queries: doctor names on patient rows come from one `$in` populate per page.
 
 ### 2. JWT in an httpOnly cookie, served first-party through the frontend's rewrite
 
@@ -167,7 +172,7 @@ Further hardening:
 
 About 9 queries run in parallel:
 - the three patient breakdowns (condition, gender, age `$bucket`) share **one `$facet` pass**;
-- the "patients per doctor" chart groups first and then `$lookup`s only the top 10 doctors;
+- the "heaviest caseloads" list reads the top 10 straight from the `patientCount` index instead of grouping every patient;
 - the admissions trend uses `$dateTrunc` (day, week or month), and the server fills empty buckets so the timeline is continuous.
 
 At large scale these would move to a precomputed collection refreshed with `$merge`.

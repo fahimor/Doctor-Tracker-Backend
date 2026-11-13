@@ -1,13 +1,14 @@
 import type { Request, Response } from 'express';
 import { input } from '../../middleware/validate.js';
-import { listPatientsSchema, patientBodyWithoutDoctor } from '../patients/patient.schema.js';
 import * as patientService from '../patients/patient.service.js';
 import {
+  addPatientSchema,
   createDoctorSchema,
   doctorIdSchema,
   doctorOptionsSchema,
   doctorPatientParams,
   listDoctorsSchema,
+  listPatientsOfDoctorSchema,
   updateDoctorSchema,
 } from './doctor.schema.js';
 import * as doctorService from './doctor.service.js';
@@ -48,14 +49,10 @@ export async function remove(req: Request, res: Response) {
 
 /* ---------- Nested: /doctors/:id/patients ---------- */
 
-export const listPatientsOfDoctorSchema = { params: doctorIdSchema.params, query: listPatientsSchema.query };
-
 export async function listPatients(req: Request, res: Response) {
   const { params, query } = input(req, listPatientsOfDoctorSchema);
   res.json(await patientService.listPatients({ ...query, doctor: params.id }));
 }
-
-export const addPatientSchema = { params: doctorIdSchema.params, body: patientBodyWithoutDoctor };
 
 export async function addPatient(req: Request, res: Response) {
   const { params, body } = input(req, addPatientSchema);

@@ -68,8 +68,8 @@ const AGE_LABELS: Record<number, string> = { 0: '0–17', 18: '18–30', 31: '31
 
 /**
  * Every widget on the dashboard comes from this one call. Independent queries
- * run in parallel, and the three patient breakdowns share a single `$facet`
- * so the patients collection is read once instead of three times.
+ * run in parallel, the three patient breakdowns share a single `$facet` so the
+ * patients collection is read once, and the top caseloads come from an index.
  */
 export async function getDashboardStats(range: DashboardRange) {
   const { from, to, prevFrom, unit } = resolvePeriod(range);
@@ -121,23 +121,13 @@ export async function getDashboardStats(range: DashboardRange) {
       },
     ]),
 
-    // Patients per doctor (top 10) — group first, then join only 10 doctor docs.
-    Patient.aggregate<{ doctorId: string; name: string; specialization: string; count: number }>([
-      { $group: { _id: '$doctor', count: { $sum: 1 } } },
-      { $sort: { count: -1, _id: 1 } },
-      { $limit: 10 },
-      {
-        $lookup: {
-          from: Doctor.collection.name,
-          localField: '_id',
-          foreignField: '_id',
-          as: 'doctor',
-          pipeline: [{ $project: { name: 1, specialization: 1 } }],
-        },
-      },
-      { $unwind: '$doctor' },
-      { $project: { _id: 0, doctorId: '$_id', name: '$doctor.name', specialization: '$doctor.specialization', count: 1 } },
-    ]),
+    // Heaviest caseloads: read the top 10 straight off the { patientCount: -1, _id: -1 }
+    // index instead of grouping the whole patients collection.
+    Doctor.find({ patientCount: { $gt: 0 } })
+      .sort({ patientCount: -1, _id: -1 })
+      .limit(10)
+      .select('name specialization patientCount')
+      .lean(),
 
     Doctor.aggregate<{ _id: string; count: number }>([
       { $group: { _id: '$specialization', count: { $sum: 1 } } },
@@ -178,9 +168,12 @@ export async function getDashboardStats(range: DashboardRange) {
     patientsByAge: (breakdowns?.byAge ?? [])
       .filter((b) => typeof b._id === 'number')
       .map((b) => ({ bucket: AGE_LABELS[b._id] ?? String(b._id), count: b.count })),
-    patientsPerDoctor: topDoctors,
+    patientsPerDoctor: topDoctors.map((d) => ({
+      doctorId: String(d._id),
+      name: d.name,
+      specialization: d.specialization,
+      count: d.patientCount ?? 0,
+    })),
     doctorsBySpecialization: specializations.map((s) => ({ specialization: s._id, count: s.count })),
   };
 }
-
-export type DashboardStats = Awaited<ReturnType<typeof getDashboardStats>>;

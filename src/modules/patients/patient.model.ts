@@ -1,4 +1,4 @@
-import { Schema, model, type InferSchemaType, type Types } from 'mongoose';
+import { Schema, model } from 'mongoose';
 import { buildSearchTokens } from '../../utils/search.js';
 import { GENDERS, PATIENT_CONDITIONS } from './patient.constants.js';
 
@@ -22,13 +22,17 @@ const patientSchema = new Schema(
 
 /*
  * Indexes — each one exists to serve a specific query in patient.service.ts
- * or dashboard.service.ts. Compound indexes follow ESR (Equality, Sort, Range).
+ * or dashboard.service.ts. Compound indexes follow ESR (Equality, Sort, Range)
+ * and end with `_id` to match the `_id` tie-breaker on every list sort, so
+ * MongoDB can stream results in order instead of sorting matches in memory.
+ * An index on { a: 1, _id: 1 } also serves { a: -1, _id: -1 } (read backwards).
  */
-patientSchema.index({ doctor: 1, admissionDate: -1 }); // a doctor's patients + "patients per doctor" $group
-patientSchema.index({ condition: 1, admissionDate: -1 }); // condition filter, newest admissions first
-patientSchema.index({ admissionDate: -1, _id: -1 }); // default sort + date range + dashboard trend
+patientSchema.index({ doctor: 1, admissionDate: -1, _id: -1 }); // a doctor's patients, patient counts per doctor
+patientSchema.index({ condition: 1, admissionDate: -1, _id: -1 }); // condition filter, latest admissions first
+patientSchema.index({ admissionDate: -1, _id: -1 }); // default sort, date ranges, dashboard trend
 patientSchema.index({ searchTokens: 1 }); // multikey index for prefix search
-patientSchema.index({ name: 1, _id: 1 }); // alphabetical sort
+patientSchema.index({ name: 1, _id: 1 }); // name A–Z / Z–A
+patientSchema.index({ age: 1, _id: 1 }); // age youngest / oldest first, age range filter
 
 type SearchablePatient = { name: string; email?: string | null; phone: string; diagnosis: string };
 
@@ -42,6 +46,4 @@ patientSchema.pre('save', function () {
   }
 });
 
-export type PatientAttrs = InferSchemaType<typeof patientSchema>;
-export type PatientLean = PatientAttrs & { _id: Types.ObjectId };
 export const Patient = model('Patient', patientSchema);
